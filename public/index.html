@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Wallet Transaction Graph</title>
+<script src="/vendor/vis-network.min.js"></script>
+<style>
+  body { margin: 0; font-family: -apple-system, Segoe UI, Roboto, sans-serif; background: #0d1117; color: #e6edf3; }
+  #controls { display: flex; gap: 10px; padding: 14px 18px; background: #161b22; align-items: center; flex-wrap: wrap; }
+  input, select, button {
+    background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px;
+    padding: 8px 10px; font-size: 14px;
+  }
+  input { flex: 1; min-width: 280px; }
+  button { background: #238636; border: none; cursor: pointer; font-weight: 600; }
+  button:hover { background: #2ea043; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  #graph { width: 100vw; height: calc(100vh - 60px); }
+  #status { padding: 6px 18px; font-size: 13px; color: #8b949e; }
+</style>
+</head>
+<body>
+
+<div id="controls">
+  <input id="address" placeholder="0x... wallet address" value="" />
+  <select id="chainId" aria-label="Network">
+    <option value="1">Ethereum</option>
+    <option value="137">Polygon</option>
+    <option value="56">BNB Smart Chain</option>
+    <option value="42161">Arbitrum One</option>
+    <option value="10">Optimism</option>
+    <option value="8453">Base</option>
+    <option value="43114">Avalanche C-Chain</option>
+    <option value="100">Gnosis</option>
+    <option value="59144">Linea</option>
+    <option value="534352">Scroll</option>
+    <option value="250">Fantom</option>
+    <option value="11155111">Sepolia testnet</option>
+  </select>
+  <select id="depth">
+    <option value="0">Depth 0 (just this wallet)</option>
+    <option value="1" selected>Depth 1</option>
+    <option value="2">Depth 2 (slower)</option>
+  </select>
+  <select id="minValue">
+    <option value="0">Any value</option>
+    <option value="0.001">≥ 0.001 native coin</option>
+    <option value="0.01">≥ 0.01 native coin</option>
+    <option value="0.1">≥ 0.1 native coin</option>
+  </select>
+  <select id="assetFilter" aria-label="Transaction asset filter">
+    <option value="all">All assets</option>
+    <option value="native">Native coin only</option>
+    <option value="token">Tokens only</option>
+  </select>
+  <label style="display:flex; align-items:center; gap:6px; font-size:13px; color:#8b949e;">
+    <input type="checkbox" id="knownOnly" style="width:auto;" /> Labeled addresses
+  </label>
+  <label style="display:flex; align-items:center; gap:6px; font-size:13px; color:#8b949e;">
+    Max tx <input id="txLimit" type="number" min="1" max="1000" value="250" style="width:76px;" />
+  </label>
+  <label style="display:flex; align-items:center; gap:6px; font-size:13px; color:#8b949e;">
+    <input type="checkbox" id="decode" style="width:auto;" /> Decode methods (whatsabi, slower)
+  </label>
+  <button id="loadBtn">Build Graph</button>
+</div>
+<div id="status"></div>
+<div id="graph"></div>
+
+<script>
+const statusEl = document.getElementById("status");
+const btn = document.getElementById("loadBtn");
+let network = null;
+let loadedGraph = null;
+
+function renderGraph() {
+  if (!loadedGraph) return;
+  const { data, chainName } = loadedGraph;
+  const nodesById = new Map(data.nodes.map((node) => [node.id, node]));
+  const assetFilter = document.getElementById("assetFilter").value;
+  const knownOnly = document.getElementById("knownOnly").checked;
+  const maxTransactions = Math.max(1, Math.min(1000, Number(document.getElementById("txLimit").value) || 250));
+  const filteredEdges = data.edges
+    .filter((edge) => assetFilter === "all"
+      || (assetFilter === "token") === (edge.source === "etherscan:token"))
+    .filter((edge) => !knownOnly
+      || nodesById.get(edge.from)?.labelInfo
+      || nodesById.get(edge.to)?.labelInfo)
+    .sort((a, b) => b.timestamp - a.timestamp)
+    .slice(0, maxTransactions);
+  const visibleNodeIds = new Set([data.meta.rootAddress.toLowerCase()]);
+  filteredEdges.forEach((edge) => {
+    visibleNodeIds.add(edge.from);
+    visibleNodeIds.add(edge.to);
+  });
+  const visibleNodes = data.nodes.filter((node) => visibleNodeIds.has(node.id));
+  const graphData = {
+    nodes: new vis.DataSet(visibleNodes.map((node) => ({
+      id: node.id,
+      label: node.label,
+      color: node.root ? "#58a6ff" : (node.labelInfo ? "#d29922" : "#30363d"),
+      font: { color: "#e6edf3" },
+      shape: "dot",
+      size: node.root ? 22 : (node.labelInfo ? 17 : 14),
+      title: node.labelInfo
+        ? `${node.labelInfo.name}\nTags: ${(node.labelInfo.labels || []).join(", ")}\n${node.id}`
+        : node.id,
+    }))),
+    edges: new vis.DataSet(filteredEdges.map((edge) => {
+      const sourceTag = edge.source.replace("etherscan:", "").replace(":", " ");
+      const methodLine = edge.method ? `Method: ${edge.method}\n` : "";
+      const confirmedLine = edge.confirmedByTrueBlocks ? "confirmed by TrueBlocks\n" : "";
+      return {
+        id: edge.id,
+        from: edge.from,
+        to: edge.to,
+        arrows: "to",
+        color: { color: edge.isError ? "#f85149" : "#3fb950", opacity: 0.6 },
+        width: Math.min(1 + Math.log10(1 + edge.value), 6),
+        title: `${methodLine}${edge.value.toFixed(5)} ${edge.asset || "native"}\n${new Date(edge.timestamp * 1000).toLocaleString()}\nSource: ${sourceTag}\n${confirmedLine}`,
+      };
+    })),
+  };
+  const options = {
+    physics: { solver: "forceAtlas2Based", stabilization: { enabled: true, iterations: 300, fit: true } },
+    interaction: { hover: true, tooltipDelay: 100 },
+  };
+  if (network) network.destroy();
+  network = new vis.Network(document.getElementById("graph"), graphData, options);
+  network.once("stabilizationIterationsDone", () => network.setOptions({ physics: false }));
+
+  const warnings = data.meta.sourceErrors || [];
+  const warningText = warnings.length ? ` · API warning: ${warnings.slice(0, 2).join("; ")}` : "";
+  const labelsText = data.meta.labelsAvailable ? ` · ${data.meta.labelsAvailable} labels loaded` : "";
+  statusEl.textContent = `${chainName}: ${visibleNodes.length} addresses, ${filteredEdges.length}/${data.edges.length} transactions${labelsText}${warningText}`;
+  statusEl.title = warnings.join("\n");
+  statusEl.style.color = warnings.length ? "#f0a35e" : "#8b949e";
+}
+
+async function loadGraph() {
+  const address = document.getElementById("address").value.trim();
+  const chainId = document.getElementById("chainId").value;
+  const chainName = document.getElementById("chainId").selectedOptions[0].textContent;
+  const depth = document.getElementById("depth").value;
+    const minValueNative = document.getElementById("minValue").value;
+  const decode = document.getElementById("decode").checked;
+
+  if (!/^0x[a-fA-F0-9]{40}$/.test(address)) {
+    statusEl.textContent = "Enter a valid 0x... address.";
+    return;
+  }
+
+  btn.disabled = true;
+  statusEl.textContent = "Fetching transactions and building graph...";
+
+  try {
+    const res = await fetch(`/api/graph/${address}?chainId=${chainId}&depth=${depth}&minValueEth=${minValueNative}&decode=${decode}`);
+    const data = await res.json();
+
+    if (data.error) {
+      statusEl.textContent = "Error: " + data.error;
+      return;
+    }
+
+    loadedGraph = { data, chainName };
+    renderGraph();
+  } catch (err) {
+    statusEl.textContent = "Request failed: " + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+btn.addEventListener("click", loadGraph);
+document.getElementById("assetFilter").addEventListener("change", renderGraph);
+document.getElementById("knownOnly").addEventListener("change", renderGraph);
+document.getElementById("txLimit").addEventListener("change", renderGraph);
+document.getElementById("address").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") loadGraph();
+});
+</script>
+</body>
+</html>
